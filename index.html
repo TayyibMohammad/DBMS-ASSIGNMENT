@@ -1,0 +1,271 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CampusCore Admin</title>
+<style>
+  :root { --bg:#f5f6f8; --panel:#fff; --ink:#1d2330; --mute:#6b7385; --line:#dde1e8; --accent:#0f6b5c; --bad:#b3261e; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui,sans-serif; color:var(--ink); background:var(--bg); display:grid; grid-template-columns:200px 1fr; min-height:100vh; }
+  nav { background:#1d2330; color:#c9cfdb; padding:16px 0; }
+  nav h1 { font-size:16px; color:#fff; margin:0 16px 12px; }
+  nav button { display:block; width:100%; text-align:left; background:none; border:0; color:inherit; padding:7px 16px; cursor:pointer; font:inherit; }
+  nav button:hover { background:#2a3243; }
+  nav button.on { background:var(--accent); color:#fff; }
+  main { padding:20px; min-width:0; display:flex; flex-direction:column; gap:16px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:14px; }
+  h2 { font-size:15px; margin:0 0 10px; }
+  .scroll { overflow:auto; max-height:320px; }
+  table { border-collapse:collapse; width:100%; }
+  th, td { text-align:left; padding:5px 10px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--mute); font-weight:600; position:sticky; top:0; background:var(--panel); }
+  form { display:flex; flex-wrap:wrap; gap:8px; align-items:end; }
+  label { display:flex; flex-direction:column; font-size:12px; color:var(--mute); gap:2px; }
+  input, select { font:inherit; padding:5px 8px; border:1px solid var(--line); border-radius:4px; width:140px; }
+  button.go, td button { font:inherit; padding:5px 12px; border:1px solid var(--accent); background:var(--accent); color:#fff; border-radius:4px; cursor:pointer; }
+  td button { padding:2px 8px; background:none; color:var(--accent); }
+  td button.del { color:var(--bad); border-color:var(--bad); }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  pre { margin:10px 0; font:12px/1.5 ui-monospace,Consolas,monospace; white-space:pre-wrap; color:var(--mute); }
+  #log { font:12px/1.6 ui-monospace,Consolas,monospace; max-height:260px; overflow:auto; }
+  #log div { padding:3px 0; border-bottom:1px solid var(--line); }
+  .ok { color:var(--accent); } .err { color:var(--bad); } .rt { color:#7a4fb0; }
+  .sql { color:var(--ink); } .time { color:var(--mute); }
+  @media (max-width:700px) { body { grid-template-columns:1fr; } nav { display:flex; overflow:auto; } nav h1 { display:none; } nav button { width:auto; white-space:nowrap; } }
+</style>
+</head>
+<body>
+<nav><h1>CampusCore</h1><div id="tables"></div></nav>
+<main>
+  <section><h2 id="title"></h2>
+    <form id="filter" style="margin-bottom:10px">
+      <label>Column<select id="fcol"></select></label>
+      <label>Condition<select id="fop"><option value="eq">equals</option><option value="neq">not equal</option><option value="gt">greater than</option><option value="gte">at least</option><option value="lt">less than</option><option value="lte">at most</option><option value="like">contains</option></select></label>
+      <label>Value<input id="fval"></label>
+      <button class="go">Filter</button><button type="button" id="fclear">Clear</button>
+    </form>
+    <div class="scroll"><table id="grid"></table></div></section>
+  <section><h2>Ready-made queries</h2>
+    <form id="qform">
+      <label>Query<select id="qsel"></select></label>
+      <label id="qlabel">Value<input id="qval"></label>
+      <button class="go">Run query</button>
+    </form>
+    <pre id="qsql"></pre><div class="scroll"><table id="qgrid"></table></div></section>
+  <section><h2 id="formTitle">Add a row</h2><form id="form"></form></section>
+  <section><h2>Database activity</h2><div id="log"></div></section>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+const SUPABASE_URL = "https://wipmaayqrdwwsftgkidz.supabase.co";
+const SUPABASE_KEY = "sb_publishable_OSloXZz8-8oJ9o8NiFV0jA_nsGQSw3x";
+
+// "*" marks primary-key columns
+const SCHEMA = {
+  department: "dept_id*,dept_code,dept_name,office_block",
+  student: "student_id*,roll_no,student_name,gender,date_of_birth,email,phone,dept_id,admission_year,student_status",
+  faculty: "faculty_id*,faculty_name,email,dept_id,designation",
+  course: "course_id*,course_code,course_title,credits,dept_id",
+  semester: "semester_id*,academic_year,semester_no,start_date,end_date",
+  course_offering: "offering_id*,course_id,semester_id,faculty_id,section_code,room_no,capacity",
+  enrollment: "enrollment_id*,student_id,offering_id,enrollment_date,enrollment_status",
+  attendance_session: "session_id*,offering_id,session_date,topic",
+  attendance_record: "session_id*,enrollment_id*,attendance_status",
+  assessment: "assessment_id*,offering_id,assessment_name,assessment_type,max_marks,assessment_date",
+  result: "assessment_id*,enrollment_id*,marks_obtained,grade,remarks",
+  result_audit: "audit_id*,assessment_id,enrollment_id,old_marks,new_marks,changed_by,changed_at"
+};
+const AUTO_ID = new Set(["department","student","faculty","course","semester","course_offering","enrollment","attendance_session","assessment","result_audit"]);
+
+const $ = id => document.getElementById(id);
+const cols = t => SCHEMA[t].split(",").map(c => ({ name: c.replace("*",""), pk: c.endsWith("*") }));
+let current = "student", editing = null;
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+const lit = v => v === null || v === undefined || v === "" ? "NULL" : isNaN(v) || v === true ? `'${String(v).replace(/'/g,"''")}'` : v;
+
+function log(kind, sql, note) {
+  const d = document.createElement("div");
+  d.innerHTML = `<span class="time">${new Date().toLocaleTimeString()}</span> <b class="${kind==='error'?'err':kind==='realtime'?'rt':'ok'}">${kind.toUpperCase()}</b> <span class="sql"></span> <span class="${kind==='error'?'err':'time'}"></span>`;
+  d.children[2].textContent = sql; d.children[3].textContent = note ? "— " + note : "";
+  $("log").prepend(d);
+}
+
+function buildNav() {
+  $("tables").innerHTML = "";
+  for (const t of Object.keys(SCHEMA)) {
+    const b = document.createElement("button");
+    b.textContent = t; b.className = t === current ? "on" : "";
+    b.onclick = () => { current = t; editing = null; filter = null; buildFilter(); buildNav(); load(); buildForm(); };
+    $("tables").append(b);
+  }
+}
+
+let filter = null;
+const OPS = { eq:"=", neq:"<>", gt:">", gte:">=", lt:"<", lte:"<=", like:"LIKE" };
+
+function buildFilter() {
+  $("fcol").innerHTML = cols(current).map(c => `<option>${c.name}</option>`).join("");
+  $("fval").value = "";
+}
+$("filter").onsubmit = e => {
+  e.preventDefault();
+  const val = $("fval").value.trim();
+  filter = val ? { col: $("fcol").value, op: $("fop").value, val } : null;
+  load();
+};
+$("fclear").onclick = () => { filter = null; $("fval").value = ""; load(); };
+
+async function load() {
+  $("title").textContent = current;
+  let q = db.from(current).select("*").limit(100), where = "";
+  if (filter) {
+    const v = filter.op === "like" ? `%${filter.val}%` : filter.val;
+    q = filter.op === "like" ? q.ilike(filter.col, v) : q[filter.op](filter.col, v);
+    where = ` WHERE ${filter.col} ${OPS[filter.op]} ${lit(v)}`;
+  }
+  const sql = `SELECT * FROM ${current}${where} FETCH FIRST 100 ROWS ONLY`;
+  const { data, error } = await q;
+  if (error) { log("error", sql, error.message); return; }
+  log("select", sql, `${data.length} rows`);
+  const c = cols(current);
+  $("grid").innerHTML = "<tr>" + c.map(x => `<th>${x.name}</th>`).join("") + "<th></th></tr>";
+  data.forEach(row => {
+    const tr = document.createElement("tr");
+    c.forEach(x => { const td = document.createElement("td"); td.textContent = row[x.name] ?? ""; tr.append(td); });
+    const act = document.createElement("td");
+    const e = document.createElement("button"); e.textContent = "Edit"; e.onclick = () => { editing = row; buildForm(); };
+    const d = document.createElement("button"); d.textContent = "Delete"; d.className = "del"; d.onclick = () => remove(row);
+    act.append(e, " ", d); tr.append(act); $("grid").append(tr);
+  });
+}
+
+function buildForm() {
+  const f = $("form"); f.innerHTML = "";
+  $("formTitle").textContent = editing ? "Edit row" : "Add a row";
+  for (const c of cols(current)) {
+    if (!editing && c.pk && AUTO_ID.has(current)) continue;
+    const l = document.createElement("label"); l.textContent = c.name;
+    const i = document.createElement("input"); i.name = c.name; i.value = editing ? (editing[c.name] ?? "") : "";
+    if (editing && c.pk) i.readOnly = true;
+    l.append(i); f.append(l);
+  }
+  const s = document.createElement("button"); s.className = "go"; s.textContent = editing ? "Save changes" : "Add row";
+  f.append(s);
+  if (editing) { const x = document.createElement("button"); x.type = "button"; x.textContent = "Cancel"; x.onclick = () => { editing = null; buildForm(); }; f.append(x); }
+}
+
+$("form").onsubmit = async e => {
+  e.preventDefault();
+  const vals = {};
+  new FormData(e.target).forEach((v, k) => vals[k] = v === "" ? null : v);
+  if (editing) {
+    const pk = cols(current).filter(c => c.pk).map(c => c.name);
+    const set = Object.fromEntries(Object.entries(vals).filter(([k]) => !pk.includes(k)));
+    const where = Object.fromEntries(pk.map(k => [k, editing[k]]));
+    const sql = `UPDATE ${current} SET ${Object.entries(set).map(([k,v]) => `${k} = ${lit(v)}`).join(", ")} WHERE ${pk.map(k => `${k} = ${lit(where[k])}`).join(" AND ")}`;
+    const { error } = await db.from(current).update(set).match(where);
+    error ? log("error", sql, error.message) : (log("update", sql), editing = null);
+  } else {
+    Object.keys(vals).forEach(k => vals[k] === null && delete vals[k]);
+    const sql = `INSERT INTO ${current} (${Object.keys(vals).join(", ")}) VALUES (${Object.values(vals).map(lit).join(", ")})`;
+    const { error } = await db.from(current).insert(vals);
+    error ? log("error", sql, error.message) : (log("insert", sql), e.target.reset());
+  }
+  buildForm(); load();
+};
+
+async function remove(row) {
+  const pk = cols(current).filter(c => c.pk).map(c => c.name);
+  const where = Object.fromEntries(pk.map(k => [k, row[k]]));
+  const sql = `DELETE FROM ${current} WHERE ${pk.map(k => `${k} = ${lit(where[k])}`).join(" AND ")}`;
+  const { error } = await db.from(current).delete().match(where);
+  error ? log("error", sql, error.message) : log("delete", sql);
+  load();
+}
+
+const QUERIES = [
+  { fn:"q_students_by_dept", ask:"Department code", def:"CSE", sql:
+`SELECT s.roll_no, s.student_name, s.email, s.admission_year, s.student_status
+FROM student s JOIN department d ON d.dept_id = s.dept_id
+WHERE d.dept_code = :value
+ORDER BY s.roll_no` },
+  { fn:"q_transcript", ask:"Roll number", def:"CSE23-001", sql:
+`SELECT c.course_code, a.assessment_name, r.marks_obtained, a.max_marks,
+       ROUND(r.marks_obtained * 100 / a.max_marks, 1) AS pct, r.grade
+FROM student s JOIN enrollment e ON e.student_id = s.student_id
+JOIN result r ON r.enrollment_id = e.enrollment_id
+JOIN assessment a ON a.assessment_id = r.assessment_id
+JOIN course_offering o ON o.offering_id = a.offering_id
+JOIN course c ON c.course_id = o.course_id
+WHERE s.roll_no = :value` },
+  { fn:"q_attendance_by_course", ask:"Course code", def:"CSE201", sql:
+`SELECT s.roll_no, s.student_name,
+       COUNT(*) FILTER (WHERE ar.attendance_status = 'PRESENT') AS present,
+       COUNT(*) AS sessions, ROUND(100 * present / sessions, 1) AS attendance_pct
+FROM attendance_record ar  -- joined to enrollment, student, attendance_session, course_offering, course
+WHERE c.course_code = :value
+GROUP BY s.roll_no, s.student_name` },
+  { fn:"q_high_scorers", ask:"Minimum percentage", def:"80", num:true, sql:
+`SELECT s.roll_no, s.student_name, c.course_code, a.assessment_name,
+       ROUND(r.marks_obtained * 100 / a.max_marks, 1) AS pct
+FROM result r  -- joined to enrollment, student, assessment, course_offering, course
+WHERE r.marks_obtained * 100 / a.max_marks >= :value
+ORDER BY pct DESC` },
+  { fn:"q_enrollment_counts", ask:"Minimum students", def:"3", num:true, sql:
+`SELECT c.course_code, c.course_title, COUNT(*) AS students
+FROM course c  -- joined to course_offering, enrollment
+WHERE e.enrollment_status = 'ENROLLED'
+GROUP BY c.course_code, c.course_title
+HAVING COUNT(*) >= :value
+ORDER BY students DESC` }
+];
+const NAMES = ["Students in a department", "A student's marks (transcript)", "Attendance % per course", "High scorers by percentage", "Courses with at least N students"];
+
+function pickQuery() {
+  const q = QUERIES[$("qsel").value];
+  $("qlabel").firstChild.textContent = q.ask;
+  $("qval").value = q.def;
+  $("qsql").textContent = q.sql.replace(":value", lit(q.num ? Number(q.def) : q.def));
+}
+function buildQueries() {
+  $("qsel").innerHTML = NAMES.map((n, i) => `<option value="${i}">${n}</option>`).join("");
+  $("qsel").onchange = pickQuery;
+  pickQuery();
+}
+$("qform").onsubmit = async e => {
+  e.preventDefault();
+  const q = QUERIES[$("qsel").value], raw = $("qval").value.trim();
+  const arg = q.num ? Number(raw) : raw;
+  const call = `SELECT * FROM ${q.fn}(${lit(arg)})`;
+  if (!raw || (q.num && isNaN(arg))) { log("error", call, "Enter a valid value first"); return; }
+  $("qsql").textContent = q.sql.replace(":value", lit(arg));
+  const { data, error } = await db.rpc(q.fn, { p_value: arg });
+  if (error) { log("error", call, error.message); return; }
+  log("select", call, `${data.length} rows`);
+  const g = $("qgrid");
+  if (!data.length) { g.innerHTML = "<tr><td>No rows match.</td></tr>"; return; }
+  const keys = Object.keys(data[0]);
+  g.innerHTML = "<tr>" + keys.map(k => `<th>${k}</th>`).join("") + "</tr>";
+  data.forEach(r => {
+    const tr = document.createElement("tr");
+    keys.forEach(k => { const td = document.createElement("td"); td.textContent = r[k] ?? ""; tr.append(td); });
+    g.append(tr);
+  });
+};
+
+if (SUPABASE_URL.startsWith("YOUR_")) {
+  log("error", "Set SUPABASE_URL and SUPABASE_KEY at the top of this file's script.");
+} else {
+  db.channel("campuscore").on("postgres_changes", { event: "*", schema: "public" }, p => {
+    const r = p.new && Object.keys(p.new).length ? p.new : p.old;
+    log("realtime", `${p.eventType} on ${p.table}: ${JSON.stringify(r)}`);
+    if (p.table === current) load();
+  }).subscribe();
+  buildNav(); buildFilter(); buildQueries(); load(); buildForm();
+}
+</script>
+</body>
+</html>
